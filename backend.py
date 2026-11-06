@@ -5,7 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bpy
 from mathutils import Matrix
 from vendor import meshio as o3d
-from asset_paths import GROUPS, clean_name, suggest_group
+from asset_paths import GROUPS, clean_name, suggest_group, source_mesh_name
 from material_graph import diffuse_image, mapping_values
 
 def convert(job):
@@ -103,11 +103,29 @@ def convert(job):
         result=o3d.Material(diffuse=o3d.ColorRGBA(*color), texture=tex)
         if mat:material_cache[mat.as_pointer()]=result
         return result
+    preserve_skin=bool(job.get('preserve_skin',False))
+    if preserve_skin or any(o.get('omsi_smoothskin',False) for o in bpy.context.scene.objects):
+        for rig in bpy.context.scene.objects:
+            if rig.type=='ARMATURE':rig.data.pose_position='REST'
+        bpy.context.view_layer.update()
     deps = bpy.context.evaluated_depsgraph_get()
     # Match the O3D convention used by Road-hog123: Z-up RH -> Y-up LH.
     axis = Matrix(((1,0,0,0),(0,0,1,0),(0,1,0,0),(0,0,0,1)))
     rotation = Matrix.Rotation(math.radians(float(job.get('rotation', 0))), 4, 'Z')
-    objects = sorted((o for o in bpy.context.scene.objects if o.type == 'MESH' and not o.hide_render), key=lambda o:o.name)
+    markers=[];marker_ids=set();used_mesh_names=set()
+    for obj in bpy.context.scene.objects:
+        prefix=obj.name.split('__',1)[0].casefold()
+        kind=str(obj.get('omsi_marker','')).casefold()
+        if not kind and prefix in {'pivot','pivo','luz','light'}:kind='light' if prefix in {'luz','light'} else 'pivot'
+        if not kind and obj.type in {'EMPTY','LIGHT'}:kind='light' if obj.type=='LIGHT' else 'pivot'
+        if kind not in {'light','pivot'}:continue
+        matrix=rotation @ Matrix.Scale(scale,4) @ obj.matrix_world
+        direction=matrix.to_3x3() @ __import__('mathutils').Vector((0,0,-1) if obj.type=='LIGHT' else (0,1,0))
+        if direction.length:direction.normalize()
+        target=str(obj.get('omsi_target',obj.name.split('__',1)[1] if '__' in obj.name else ''))
+        markers.append({'name':obj.name,'kind':kind,'target':target,'xyz':list(matrix.translation),'direction':list(direction),'variable':str(obj.get('omsi_variable',''))})
+        marker_ids.add(obj.as_pointer())
+    objects = sorted((o for o in bpy.context.scene.objects if o.type == 'MESH' and not o.hide_render and o.as_pointer() not in marker_ids), key=lambda o:o.name)
     for index, obj in enumerate(objects):
         ev = obj.evaluated_get(deps)
         me = ev.to_mesh(preserve_all_data_layers=True, depsgraph=deps)
@@ -133,7 +151,13 @@ def convert(job):
             uv = me.uv_layers.active
             if not uv:
                 warnings.append('Peça sem UV: '+obj.name)
-            lookup = {}
+            lookup = {};weight_lists=collections.defaultdict(list)
+            skinned=bool(obj.vertex_groups) and (preserve_skin or bool(obj.get('omsi_smoothskin',False)))
+            group_names={g.index:g.name for g in obj.vertex_groups}
+            if skinned:
+                for name in group_names.values():
+                    raw=name.encode('cp1252')
+                    if len(raw)>255 or any(c in name for c in '\r\n'):raise ValueError('Nome de grupo incompatível: '+name)
             degenerate_count = repaired_normals = invalid_normals = 0
             for tri in me.loop_triangles:
                 local_co = [me.vertices[i].co for i in tri.vertices]
@@ -170,10 +194,19 @@ def convert(job):
                     data = (*pos, *norm, u, 1-v)
                     if not all(math.isfinite(v) for v in data):
                         raise ValueError('Geometria contém valores inválidos: '+obj.name)
-                    if data not in lookup:
-                        lookup[data] = len(mesh.vertices)
+                    weights=()
+                    if skinned:
+                        groups=me.vertices[me.loops[li].vertex_index].groups
+                        values=[(group_names[g.group],float(g.weight)) for g in groups if g.group in group_names and g.weight>0]
+                        total=sum(w for _,w in values)
+                        if total<=0:raise ValueError('Smoothskin: vértice sem peso em '+obj.name+'. Pinte todos os vértices ou desmarque a opção de pesos.')
+                        weights=tuple(sorted((name,w/total) for name,w in values))
+                    vertex_key=(data,weights)
+                    if vertex_key not in lookup:
+                        lookup[vertex_key] = len(mesh.vertices)
+                        for name,weight in weights:weight_lists[name].append(o3d.SkinWeight(len(mesh.vertices),weight))
                         mesh.vertices.append(o3d.Vertex(o3d.Vector3(*data[:3]), o3d.Vector3(*data[3:6]), o3d.Vector2(*data[6:])))
-                    indices.append(lookup[data])
+                    indices.append(lookup[vertex_key])
                 mesh.triangles.append(o3d.Triangle(tuple(indices), min(tri.material_index,len(mesh.materials)-1)))
             if degenerate_count:
                 warnings.append(('Triângulos sem área removidos da saída' if repair else 'Triângulos sem área detectados')+': '+obj.name+' ('+str(degenerate_count)+')')
@@ -182,17 +215,20 @@ def convert(job):
             if not mesh.triangles:
                 warnings.append('Peça sem faces exportáveis: '+obj.name)
                 continue
-            name = '%04d_%s.o3d' % (index, clean_name(obj.name))
+            if skinned:
+                if any(len(values)>65535 for values in weight_lists.values()):raise ValueError('Smoothskin: grupo com mais de 65535 pesos; divida a malha: '+obj.name)
+                mesh.bones=[o3d.Bone(name,tuple(values)) for name,values in sorted(weight_lists.items())]
+            name = source_mesh_name(obj.name,used_mesh_names)
             group=suggest_group(obj.name)
             if organize:name=group+'/'+name
             (out/'model'/name).write_bytes(o3d.dump(mesh, o3d.MeshFormatSpec(7)))
-            entries.append({'object':obj.name, 'file':name,'group':group,'vertices':len(mesh.vertices),'triangles':len(mesh.triangles), 'zero_area_detected':degenerate_count, 'zero_area_removed':degenerate_count if repair else 0, 'normal_corners_repaired':repaired_normals, 'origin_xyz':list((rotation @ Matrix.Scale(scale,4) @ obj.matrix_world).translation), 'origin_matrix_o3d':[list(row) for row in mesh.matrix], 'materials':material_records})
+            entries.append({'object':obj.name, 'file':name,'group':group,'vertices':len(mesh.vertices),'triangles':len(mesh.triangles), 'zero_area_detected':degenerate_count, 'zero_area_removed':degenerate_count if repair else 0, 'normal_corners_repaired':repaired_normals, 'origin_xyz':list((rotation @ Matrix.Scale(scale,4) @ obj.matrix_world).translation), 'origin_matrix_o3d':[list(row) for row in mesh.matrix], 'materials':material_records,'bones':sorted(weight_lists)})
         finally:
             ev.to_mesh_clear()
     if not entries:
         raise ValueError('Nenhuma malha com faces encontrada.')
     (out/'model'/'meshes.cfg').write_text('\n'.join('[mesh]\n'+e['file'].replace('/','\\')+'\n' for e in entries),encoding='cp1252')
-    report = {'format_version':2, 'organized':organize, 'textures':texture_records, 'repair_geometry':repair, 'source':str(src), 'blender':bpy.app.version_string,'meshes':entries,'warnings':sorted(set(warnings)),
+    report = {'format_version':2, 'markers':markers, 'preserve_skin':preserve_skin, 'organized':organize, 'textures':texture_records, 'repair_geometry':repair, 'source':str(src), 'blender':bpy.app.version_string,'meshes':entries,'warnings':sorted(set(warnings)),
               'note':'Geometria estática. meshes.cfg é um trecho de configuração, não um veículo completo.'}
     (out/'report.json').write_text(json.dumps(report,indent=2,ensure_ascii=False),encoding='utf8')
     from project import new_project, save_project

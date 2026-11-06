@@ -1,3 +1,5 @@
+> Manual histórico do conversor. Para as funções atuais, consulte [GUIA_v0.0.2.md](GUIA_v0.0.2.md).
+
 # Manual do O3D Studio 0.0.1
 
 A documentação abaixo reproduz o histórico do conversor de origem. A versão publicada do O3D Studio é 0.0.1.
@@ -257,3 +259,4 @@ Este ZIP contém código-fonte, não EXE pré-compilado nem Blender portátil. O
 Visualização/edição 3D interativa, prévia animada, deslocamento da geometria no editor, luzes projetadas, cabine/passengers, telas dinâmicas, fontes, deformação por ossos, geração de física e .bus completos, execução/simulação dos scripts e calibração automática. Esses recursos não estão implícitos no botão Gerar CFG.
 
 Fontes e licenças de componentes em THIRD_PARTY.md. Código próprio GPL-3.0-or-later.
+

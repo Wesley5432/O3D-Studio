@@ -9,6 +9,15 @@ def clean_name(value,fallback='Peca',limit=70):
  if value.upper() in RESERVED:value='_'+value
  return value
 
+def source_mesh_name(value,used):
+ """Keep the source object spelling; change only invalid Windows characters/collisions."""
+ name=str(value).encode('cp1252','replace').decode('cp1252')
+ name=re.sub(r'[<>:"/\\|?*\x00-\x1f\[\]]','_',name).rstrip(' .')[:200] or 'Objeto'
+ if name.split('.')[0].upper() in RESERVED:name='_'+name
+ candidate=name;counter=2
+ while (candidate+'.o3d').casefold() in used:candidate=name+'_'+str(counter);counter+=1
+ used.add((candidate+'.o3d').casefold());return candidate+'.o3d'
+
 def mesh_path(value):
  if not isinstance(value,str) or any(c in value for c in '\\:\r\n[]\x00'):raise ValueError('Caminho de O3D inválido')
  parts=value.split('/')

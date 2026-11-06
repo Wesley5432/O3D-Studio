@@ -8,7 +8,7 @@ from project import atomic_text
 class Studio:
  def __init__(self,root):
   self.root=root;self.template=None;self.plan=None;self.targets={};self.selected=None;self.jobs=queue.Queue();self.busy=False
-  root.title('O3D Studio 0.0.1');root.geometry('1280x850');root.minsize(1050,720)
+  root.title('O3D Studio v0.0.2');root.geometry('1280x850');root.minsize(1050,720)
   from ui_theme import apply_theme
   apply_theme(root)
   outer=ttk.Frame(root,padding=18);outer.pack(fill='both',expand=True)
@@ -18,7 +18,7 @@ class Studio:
   bar=ttk.Frame(outer);bar.pack(fill='x',pady=(0,8))
   action_menu(bar,'Importar',[('BLEND / OBJ / 3DS',self.converter),('O3D já exportado',self.import_ready)],self.guard).pack(side='left',padx=(0,6))
   action_menu(bar,'Projeto',[('Abrir montagem',self.open),('Salvar montagem',self.save)],self.guard).pack(side='left',padx=(0,6))
-  action_menu(bar,'Ferramentas',[('Editor de peças / CFG independente',self.universal),('Adaptar scripts',self.script_only),('Coordenadas das luzes',self.lights)],self.guard).pack(side='left')
+  action_menu(bar,'Ferramentas',[('Editor de peças / CFG independente',self.universal),('Adaptar scripts',self.script_only),('Coordenadas das luzes',self.lights),('Ônibus articulado',self.articulated),('Variáveis e usos no CFG',self.catalog),('O3D → OBJ',self.export_obj)],self.guard).pack(side='left')
   self.tabs=ttk.Notebook(outer);self.tabs.pack(fill='both',expand=True,pady=8)
   self.base=self.tab('1  Base');self.parts=self.tab('2  Peças');self.assets=self.tab('3  Aparência');self.validation=self.tab('4  Exportar')
   self.fields={}
@@ -46,13 +46,18 @@ class Studio:
   self.target=tk.StringVar();self.targetbox=ttk.Combobox(right,textvariable=self.target,state='readonly');self.targetbox.pack(fill='x',pady=7);self.targetbox.bind('<<ComboboxSelected>>',lambda e:self.guard(self.materials))
   detail=ttk.Notebook(right);detail.pack(fill='both',expand=True,pady=8)
   materials_tab=ttk.Frame(detail,padding=8);animation_tab=ttk.Frame(detail,padding=8);cfg_tab=ttk.Frame(detail,padding=8)
-  detail.add(materials_tab,text='Materiais');detail.add(animation_tab,text='Animação');detail.add(cfg_tab,text='Código CFG')
+  detail.add(materials_tab,text='Materiais');detail.add(animation_tab,text='Animação');detail.add(cfg_tab,text='Código CFG');skin_tab=ttk.Frame(detail,padding=8);detail.add(skin_tab,text='Deformação')
+  ttk.Label(skin_tab,text='Cada grupo com peso acompanha uma peça controladora da referência.\nOs índices do CFG são recalculados ao exportar.',wraplength=560).pack(anchor='w')
+  self.skin_frame=self.scroll_area(skin_tab,height=240);self.bone_vars={}
   self.material_frame=self.scroll_area(materials_tab,height=240);self.material_vars={}
   ttk.Label(animation_tab,text='Variáveis da peça',style='Muted.TLabel').pack(anchor='w',pady=(4,8))
   self.variable_frame=self.scroll_area(animation_tab,height=160);self.variable_vars={}
   ttk.Label(animation_tab,text='Pivô XYZ em metros · vazio mantém a origem').pack(anchor='w',pady=(12,4))
   self.pivot=tk.StringVar();ttk.Entry(animation_tab,textvariable=self.pivot).pack(fill='x')
   self.confirmed=tk.BooleanVar();ttk.Checkbutton(animation_tab,text='Pivô e eixos conferidos',variable=self.confirmed).pack(anchor='w',pady=10)
+  ttk.Button(animation_tab,text='Prévia 3D da animação',command=lambda:self.guard(self.preview_animation)).pack(anchor='w',pady=6)
+  self.marker=tk.StringVar();self.marker_box=ttk.Combobox(animation_tab,textvariable=self.marker,state='readonly');self.marker_box.pack(fill='x',pady=4)
+  ttk.Button(animation_tab,text='Usar coordenadas do marcador Blender',command=lambda:self.guard(self.use_marker)).pack(anchor='w')
   ttk.Button(right,text='Aplicar associação',style='Accent.TButton',command=lambda:self.guard(self.apply)).pack(anchor='e',pady=8)
   ttk.Button(cfg_tab,text='Atualizar prévia adaptada',command=lambda:self.guard(self.preview)).pack(anchor='w',pady=(0,8))
   self.block=tk.Text(cfg_tab,height=10,wrap='none',background='#14243a',foreground='#dce8f8',insertbackground='white',font=('Consolas',10),padx=12,pady=10,relief='flat');self.block.pack(fill='both',expand=True)
@@ -68,7 +73,8 @@ class Studio:
   self.export_button=ttk.Button(actions,text='Exportar pacote',style='Accent.TButton',command=lambda:self.guard(self.export));self.export_button.pack(side='left',padx=8)
   self.result=tk.Text(self.validation,wrap='word');self.result.pack(fill='both',expand=True,pady=10)
   self.status=tk.StringVar(value='Pronto para começar.');ttk.Label(outer,textvariable=self.status).pack(anchor='w')
-  root.after(200,self.poll)
+  self.poll_job=root.after(200,self.poll)
+  root.bind('<Destroy>',self.on_destroy,add='+')
  def scroll_area(self,parent,height):
   container=ttk.Frame(parent);container.pack(fill='both',expand=True)
   canvas=tk.Canvas(container,height=height,highlightthickness=0);scroll=ttk.Scrollbar(container,orient='vertical',command=canvas.yview);canvas.configure(yscrollcommand=scroll.set)
@@ -127,6 +133,22 @@ class Studio:
    from editor import open_editor
    open_editor(self.root,path)
   import_dialog(self.root,done)
+ def articulated(self):
+  from articulated_ui import open_articulated
+  open_articulated(self.root)
+ def export_obj(self):
+  from obj_export_ui import export_files_dialog
+  export_files_dialog(self.root)
+ def catalog(self):
+  from catalog_ui import show_catalog
+  if self.template:
+   from vehicle_template import txt
+   show_catalog(self.root,profile=self.template['profile'],cfg_sources=[(self.template['source_cfg'],txt(self.template['source_cfg']),Path(self.template['bus']).name)],bus=self.template.get('profile_bus',self.template['bus']))
+  else:
+   path=filedialog.askopenfilename(parent=self.root,title='CFG para consultar variáveis',filetypes=[('Configuração OMSI','*.cfg')])
+   if path:
+    from vehicle_template import txt
+    show_catalog(self.root,cfg_sources=[(path,txt(path),'')])
  def lights(self):
   from adaptation_ui import light_editor
   light_editor(self.root)
@@ -144,7 +166,8 @@ class Studio:
   cfg=self.fields['cfg'].get()
   if cfg and not Path(cfg).read_bytes().strip():
    self.universal(cfg);return
-  template=load_template(self.fields['bus'].get(),self.fields['cfg'].get() or None);plan=new_plan(template,self.fields['converted'].get());self.install(template,plan)
+  profile_bus=self.plan.get('profile_bus') if self.plan and self.template and self.fields['bus'].get()==self.template['bus'] else None
+  template=load_template(self.fields['bus'].get(),self.fields['cfg'].get() or None,profile_bus);plan=new_plan(template,self.fields['converted'].get());self.install(template,plan)
  def install(self,template,plan):
   self.template=template;self.plan=plan;self.selected=None
   self.targets=target_parts(plan['converted']) if plan.get('converted') else {}
@@ -152,6 +175,8 @@ class Studio:
   self.fields['cfg'].set(plan.get('reference_cfg',''))
   self.fields['bus'].set(template['bus']);self.targetbox['values']=list(self.targets)
   self.info.config(text=f"Base: {Path(template['bus']).name} · Scripts: {len(template['profile']['selected'].get('[script]',[]))}\n{len(template['pieces'])} peças · {len(template['fonts'])} fontes · {len(template['skins'])} canais de skin\n{template['cfg']}")
+  self.markers=json.loads((Path(plan['converted'])/'project.json').read_text(encoding='utf8')).get('markers',[]) if plan.get('converted') else []
+  self.marker_box['values']=[m['name'] for m in self.markers];self.marker.set('')
   self.populate_assets();self.refresh()
  def refresh(self):
   if not self.template:return
@@ -162,11 +187,15 @@ class Studio:
   selected=self.tree.selection()
   if not selected:return
   self.selected=next(p for p in self.template['pieces'] if p['id']==selected[0]);m=self.plan['mapping'].get(self.selected['id'],{})
-  self.part_title.config(text=self.selected['mesh']);self.mode.set(m.get('mode','pending'));self.target.set(m.get('target',''));self.pivot.set(', '.join(map(str,m['pivot'])) if m.get('pivot') else '');self.confirmed.set(m.get('confirmed',False));self.materials(m.get('materials',{}));self.populate_variables(m.get('variables',{}))
+  self.part_title.config(text=self.selected['mesh']);self.mode.set(m.get('mode','pending'));self.target.set(m.get('target',''));self.pivot.set(', '.join(map(str,m['pivot'])) if m.get('pivot') else '');self.confirmed.set(m.get('confirmed',False));self.materials(m.get('materials',{}));self.populate_variables(m.get('variables',{}));self.populate_bones(m.get('bones',{}))
   self.block.delete('1.0','end');self.block.insert('1.0',self.selected['block']);self.status.set('Bloco original para consulta. Clique Aplicar para guardar as alterações da peça.')
  def preview(self):
   if not self.selected:raise ValueError('Selecione uma peça')
-  try:block=preview_piece(self.selected,self.plan['mapping'].get(self.selected['id'],{}),self.targets)
+  try:
+   block=preview_piece(self.selected,self.plan['mapping'].get(self.selected['id'],{}),self.targets)
+   if block:
+    from skin_cfg import patch_skin
+    block=patch_skin(block,self.template,self.plan,self.selected,self.targets)
   except (KeyError,IndexError):raise ValueError('Aplique a associação e preencha todos os materiais antes da prévia')
   self.block.delete('1.0','end');self.block.insert('1.0',block or 'Peça marcada para remoção.')
   self.status.set('Prévia do bloco adaptado. A exportação ainda verifica a montagem completa.')
@@ -179,17 +208,40 @@ class Studio:
    row=ttk.Frame(self.material_frame);row.pack(fill='x');ttk.Label(row,text=k,width=28).pack(side='left');v=tk.StringVar();self.material_vars[k]=v
    ttk.Combobox(row,textvariable=v,values=values,state='readonly').pack(side='left',fill='x',expand=True)
    if maps and k in maps and 0<=maps[k]<len(values):v.set(values[maps[k]])
+  self.populate_bones({})
+ def populate_bones(self,mapping):
+  for widget in self.skin_frame.winfo_children():widget.destroy()
+  self.bone_vars={}
+  if not self.selected:return
+  bones=self.targets.get(self.target.get(),{}).get('bones_actual',[])
+  values=[p['id']+' — '+p['mesh'] for p in self.template['pieces'] if p['id']!=self.selected['id'] and p.get('lod',0)==0]
+  for bone in bones:
+   row=ttk.Frame(self.skin_frame);row.pack(fill='x',pady=4);ttk.Label(row,text=bone,width=22).pack(side='left');id=mapping.get(bone,'');v=tk.StringVar(value=next((value for value in values if value.split(' — ',1)[0]==id),''));self.bone_vars[bone]=v;ttk.Combobox(row,textvariable=v,values=['',*values],state='readonly').pack(side='left',fill='x',expand=True)
  def populate_variables(self,mapping):
   for w in self.variable_frame.winfo_children():w.destroy()
   self.variable_vars={}
   values=sorted(set(self.template['profile']['variables']+self.selected['variables']+['brake','throttle','clutch']))
   for old in self.selected['variables']:
    row=ttk.Frame(self.variable_frame);row.pack(fill='x',pady=2);ttk.Label(row,text=old,width=28).pack(side='left');v=tk.StringVar(value=mapping.get(old,old));self.variable_vars[old]=v;ttk.Combobox(row,textvariable=v,values=values).pack(side='left',fill='x',expand=True)
- def apply(self):
+ def association(self):
   if not self.selected:raise ValueError('Selecione uma peça')
   variables={k:v.get().strip() for k,v in self.variable_vars.items() if v.get().strip()!=k}
   pivot=[float(v.strip()) for v in self.pivot.get().split(',')] if self.pivot.get().strip() else None
-  self.plan['mapping'][self.selected['id']]={'mode':self.mode.get(),'target':self.target.get(),'materials':{k:int(v.get().split(' · ')[0]) for k,v in self.material_vars.items() if v.get()},'variables':variables,'pivot':pivot,'confirmed':self.confirmed.get()};self.refresh();self.status.set('Associação aplicada. Salve a montagem para continuar depois.')
+  return {'mode':self.mode.get(),'target':self.target.get(),'materials':{k:int(v.get().split(' · ')[0]) for k,v in self.material_vars.items() if v.get()},'variables':variables,'bones':{bone:v.get().split(' — ',1)[0] for bone,v in self.bone_vars.items() if v.get()},'pivot':pivot,'confirmed':self.confirmed.get()}
+ def apply(self):
+  self.plan['mapping'][self.selected['id']]=self.association();self.refresh();self.status.set('Associação aplicada. Salve a montagem para continuar depois.')
+ def use_marker(self):
+  marker=next((m for m in self.markers if m['name']==self.marker.get()),None)
+  if not marker:raise ValueError('Escolha um marcador importado do Blender')
+  self.pivot.set(', '.join(map(str,marker['xyz'])));self.status.set('Pivô preenchido. Confira o eixo na prévia antes de aplicar.')
+ def preview_animation(self):
+  import copy
+  from assembly_preview import preview_project
+  from animation_preview import open_preview
+  if not self.selected:raise ValueError('Selecione uma peça')
+  plan=copy.deepcopy(self.plan);plan['mapping'][self.selected['id']]=self.association()
+  if plan['mapping'][self.selected['id']]['mode']=='remove':raise ValueError('A peça está marcada para remoção')
+  project=preview_project(self.template,plan,self.targets);open_preview(self.root,plan.get('converted') or self.template['root'],project,self.selected['id'])
  def suggest(self):
   if not self.plan:raise ValueError('Carregue uma base e o projeto do modelo novo')
   from vehicle_template import suggest_mappings
@@ -215,7 +267,7 @@ class Studio:
  def open(self):
   p=filedialog.askopenfilename(filetypes=[('Montagem','*.json')])
   if p:
-   plan=json.loads(Path(p).read_text(encoding='utf8'));self.install(load_template(plan['reference_bus'],plan.get('reference_cfg')),plan)
+   plan=json.loads(Path(p).read_text(encoding='utf8'));self.install(load_template(plan['reference_bus'],plan.get('reference_cfg'),plan.get('profile_bus')),plan)
  def validate(self):
   self.sync();check=scan_plan(self.template,self.plan)
   if not check['errors']:
@@ -233,12 +285,15 @@ class Studio:
    try:self.jobs.put((True,str(build(template,plan,dest))))
    except Exception as e:self.jobs.put((False,str(e)))
   threading.Thread(target=worker,daemon=True).start()
+ def on_destroy(self,event):
+  if event.widget==self.root and getattr(self,'poll_job',None):
+   self.root.after_cancel(self.poll_job);self.poll_job=None
  def poll(self):
   try:
    ok,result=self.jobs.get_nowait();self.busy=False;self.export_button.config(state='normal');self.status.set(('Pacote criado: ' if ok else 'Falha: ')+result)
    (messagebox.showinfo if ok else messagebox.showerror)('Montagem',result,parent=self.root)
   except queue.Empty:pass
-  self.root.after(200,self.poll)
+  self.poll_job=self.root.after(200,self.poll)
 
 def main():
  root=tk.Tk();Studio(root);root.mainloop()

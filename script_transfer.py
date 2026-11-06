@@ -87,9 +87,10 @@ def package_cfg_scripts(folder,project,donor_bus,destination):
    from asset_paths import mesh_path
    mesh_path(part['file'])
   donor=Path(donor_bus).resolve();index(donor.parent)
+  from articulated import load_chain
+  chain=load_chain(donor)
+  if len(chain['sections'])>1:raise ValueError('Use Ferramentas → Ônibus articulado para gerar CFGs separados da dianteira e do reboque')
   shutil.copytree(donor.parent,stage,dirs_exist_ok=True)
-  for other in stage.glob('*.bus'):
-   if other.name!=donor.name:other.unlink()
   # Canonicalize resource directories on case-sensitive hosts too.
   for child in list(stage.iterdir()):
    if child.is_dir() and child.name.casefold() in {'model','texture'} and child.name!=child.name.lower():child.rename(stage/child.name.lower())

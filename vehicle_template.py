@@ -37,7 +37,7 @@ def resolve(root,files,ref,parent=''):
    parts.append(s)
  return files.get('/'.join(parts).casefold())
 def key(texture,occurrence):return texture+'|'+str(occurrence)
-def load_template(bus,cfg_override=None):
+def load_template(bus,cfg_override=None,profile_bus=None):
  bus=Path(bus).resolve();root=bus.parent;files=index(root);bus_text=txt(bus);cs=commands(bus_text)
  model=next((arg(c) for c in cs if c['tag']=='[model]'),None)
  if not model:raise ValueError('.bus sem [model]')
@@ -45,7 +45,10 @@ def load_template(bus,cfg_override=None):
  if not cfg:raise ValueError('CFG visual ausente: '+model)
  source_cfg=Path(cfg_override).resolve() if cfg_override else cfg
  text=txt(source_cfg);starts=[c['start'] for c in commands(text) if c['tag']=='[mesh]']
- pieces=[]
+ pieces=[];lod_by_start={};lod=-1
+ for command in commands(text):
+  if command['tag']=='[LOD]':lod+=1
+  elif command['tag']=='[mesh]':lod_by_start[command['start']]=max(0,lod)
  for i,start in enumerate(starts):
   block=text[start:starts[i+1] if i+1<len(starts) else len(text)];bc=commands(block);mesh=arg(bc[0]);p=resolve(root,files,mesh,cfg.parent.relative_to(root).as_posix());meta=read_o3d(p) if p else None
   selectors={};variables=set()
@@ -55,15 +58,15 @@ def load_template(bus,cfg_override=None):
     lines=c['args']
     for n,v in enumerate(lines[:-1]):
      if v.strip() in {'anim_rot','anim_trans'}:variables.add(lines[n+1].strip())
-  pieces.append({'id':'mesh_%04d'%i,'mesh':mesh,'block':block,'exists':bool(p),'slots':slots(meta) if meta else [],'selectors':selectors,'variables':sorted(variables),'has_origin':bool(meta and meta['matrix'])})
+  pieces.append({'id':'mesh_%04d'%i,'lod':lod_by_start[start],'mesh':mesh,'block':block,'exists':bool(p),'slots':slots(meta) if meta else [],'selectors':selectors,'variables':sorted(variables),'has_origin':bool(meta and meta['matrix'])})
  header=text[:starts[0]] if starts else text
  fonts=sorted({arg(c,1) for c in commands(text) if c['tag'] in {'[texttexture]','[texttexture_enh]'}})
  skins=[{'variable':arg(c),'texture':arg(c,1)} for c in commands(header) if c['tag']=='[CTCTexture]']
- return {'bus':str(bus),'root':str(root),'bus_hash':digest(bus),'cfg':str(cfg),'source_cfg':str(source_cfg),'cfg_hash':digest(source_cfg),'header':header,'pieces':pieces,'fonts':fonts,'skins':skins,'profile':load_profile(bus)}
+ return {'bus':str(bus),'root':str(root),'bus_hash':digest(bus),'cfg':str(cfg),'source_cfg':str(source_cfg),'cfg_hash':digest(source_cfg),'header':header,'pieces':pieces,'fonts':fonts,'skins':skins,'profile':load_profile(profile_bus or bus),'profile_bus':str(Path(profile_bus or bus).resolve())}
 
 def new_plan(template,converted):
  return {'version':3,'reference_bus':template['bus'],'reference_cfg':template.get('source_cfg',template['cfg']),'bus_hash':template['bus_hash'],'cfg_hash':template['cfg_hash'],'converted':str(Path(converted).resolve()) if converted else '',
-         'name':'Meu_veiculo','engine':'OMSI 2','mapping':{},'font_map':{},'fonts_folder':'','skin_folder':'','skin_targets':{},'base_textures':{}}
+         'profile_bus':template.get('profile_bus',template['bus']),'name':'Meu_veiculo','engine':'OMSI 2','mapping':{},'font_map':{},'fonts_folder':'','skin_folder':'','skin_targets':{},'base_textures':{}}
 
 def target_parts(folder):
  folder=Path(folder);p=json.loads((folder/'project.json').read_text(encoding='utf8'));result={}
@@ -71,7 +74,7 @@ def target_parts(folder):
   f=part['file']
   mesh_path(f)
   path=folder/'model'/f
-  result[f]={**part,'slots_actual':slots(read_o3d(path))}
+  info=read_o3d(path);result[f]={**part,'slots_actual':slots(info),'bones_actual':info.get('bone_names',[])}
  return result
 
 def set_arg(block,tag,n,value):
@@ -129,7 +132,6 @@ def scan_plan(template,plan):
   for old,new in m.get('variables',{}).items():
    if old not in piece['variables'] or not variable_ok(new,template['profile']):errors.append('Variável de animação inválida: '+old+' -> '+new)
   if mode=='replace':
-   if any(c['tag'] in {'[setbone]','[smoothskin]'} for c in commands(piece['block'])):errors.append('Peça com esqueleto exige adaptação de bones fora desta versão: '+piece['mesh'])
    target=targets.get(m.get('target'))
    if not target:errors.append('Peça de destino ausente: '+piece['mesh']);continue
    if m['target'] in used and used[m['target']]!=piece['mesh']:errors.append('Mesma malha usada em funções distintas: '+m['target'])
@@ -149,6 +151,10 @@ def scan_plan(template,plan):
    if not m.get('confirmed'):errors.append('Confirme pivô/eixos da peça '+piece['mesh'])
    try:pivot_patch(piece['block'],m.get('pivot'))
    except Exception as e:errors.append(str(e))
+ try:
+  from skin_cfg import validate_bindings
+  validate_bindings(template,plan,targets)
+ except Exception as e:errors.append(str(e))
  if not surviving and not counts['pending']:errors.append('O veículo precisa manter ao menos uma peça')
  if counts['pending']:errors.append(str(counts['pending'])+' peças ainda sem decisão')
  ids={arg(c) for p in surviving for c in commands(p['block']) if c['tag']=='[mesh_ident]'}
@@ -207,17 +213,18 @@ def scan_plan(template,plan):
  warnings.extend(['Física, câmeras, luzes e caminhos herdados precisam de ajuste ao novo veículo.','OMSI 2 e openOMSI: pacote não executado nos motores; validar no jogo e conferir logfile.'])
  return {'errors':list(dict.fromkeys(errors)),'warnings':list(dict.fromkeys(warnings)),'counts':counts,'targets':targets,'material_destinations':{k:sorted(v) for k,v in material_destinations.items()}}
 
-def texture_names(targets):
- return {s['texture']:'CV_'+hashlib.sha256(s['texture'].casefold().encode()).hexdigest()[:12]+Path(s['texture'].replace('\\','/')).suffix.lower() for t in targets.values() for s in t['slots_actual'] if s['texture']}
+def texture_names(targets,namespace=''):
+ if namespace and not re.fullmatch(r'_S[0-9]+',namespace):raise ValueError('Identificador de seção inválido')
+ return {s['texture']:'CV'+namespace+'_'+hashlib.sha256(s['texture'].casefold().encode()).hexdigest()[:12]+Path(s['texture'].replace('\\','/')).suffix.lower() for t in targets.values() for s in t['slots_actual'] if s['texture']}
 
-def preview_piece(piece,m,targets):
+def preview_piece(piece,m,targets,namespace=''):
  if m.get('mode')=='remove':return ''
  if m.get('mode') not in {'keep','replace'}:raise ValueError('Escolha manter ou substituir a peça')
- names=texture_names(targets)
+ names=texture_names(targets,namespace)
  block=piece['block']
  if m['mode']=='replace':
   target=targets[m['target']]
-  block=set_arg(block,'[mesh]',0,'Convertidos\\'+m['target'].replace('/','\\'))
+  block=set_arg(block,'[mesh]',0,'Convertidos'+namespace+'\\'+m['target'].replace('/','\\'))
   for c in reversed(commands(block)):
    if c['tag'] not in {'[matl]','[matl_change]'}:continue
    slot=target['slots_actual'][m['materials'][key(arg(c),int(arg(c,1)))]]
@@ -230,7 +237,7 @@ def preview_piece(piece,m,targets):
 def render_cfg(template,plan,check=None):
  check=check or scan_plan(template,plan)
  if check['errors']:raise ValueError('\n'.join(check['errors']))
- names=texture_names(check['targets'])
+ names=texture_names(check['targets'],plan.get('namespace',''))
  header=template['header'];blocks=[]
  for c in reversed(commands(header)):
   sub=header[c['start']:c['end']]
@@ -241,12 +248,14 @@ def render_cfg(template,plan,check=None):
     if selected in names:sub=set_arg(sub,c['tag'],1,names[selected])
     elif selected!=arg(c,1):raise ValueError('Textura de skin desconhecida: '+selected)
    elif options:raise ValueError('Escolha a textura da skin: '+arg(c))
-  elif c['tag']=='[CTC]' and plan.get('skin_folder'):sub=set_arg(sub,c['tag'],1,'Texture\\Pinturas_Convertidas')
+  elif c['tag']=='[CTC]' and plan.get('skin_folder'):sub=set_arg(sub,c['tag'],1,'Texture\\Pinturas_Convertidas'+plan.get('namespace',''))
   header=header[:c['start']]+sub+header[c['end']:]
  for piece in template['pieces']:
   m=plan['mapping'][piece['id']]
   if m['mode']=='remove':continue
-  block=preview_piece(piece,m,check['targets'])
+  block=preview_piece(piece,m,check['targets'],plan.get('namespace',''))
+  from skin_cfg import patch_skin
+  block=patch_skin(block,template,plan,piece,check['targets'])
   blocks.append(block)
  result=header+''.join(blocks)
  for c in reversed(commands(result)):
@@ -255,47 +264,55 @@ def render_cfg(template,plan,check=None):
    result=result[:c['start']]+sub+result[c['end']:]
  return result,names
 
+def write_section(template,plan,check,cfg,names,vehicle,stage):
+ source=Path(template['root'])
+ cfgpath=vehicle/Path(template['cfg']).relative_to(source);cfgpath.write_bytes(cfg.replace('\n','\r\n').encode('cp1252'))
+ texture_root=next((p for p in vehicle.iterdir() if p.name.casefold()=='texture'),vehicle/'Texture');texture_root.mkdir(exist_ok=True)
+ texture_files=index(Path(plan['converted'])/'texture') if check['counts']['replace'] else {}
+ used={m['target'] for m in plan['mapping'].values() if m['mode']=='replace'}
+ meshes=cfgpath.parent/('Convertidos'+plan.get('namespace',''));meshes.mkdir(exist_ok=True)
+ for f in used:
+  raw=(Path(plan['converted'])/'model'/f).read_bytes();(meshes/f).parent.mkdir(parents=True,exist_ok=True);(meshes/f).write_bytes(patch_textures(raw,names))
+ needed={s['texture'] for f in used for s in check['targets'][f]['slots_actual'] if s['texture']}
+ for original in needed:
+  target=texture_root/names[original]
+  if target.exists():raise ValueError('Colisão com textura da referência: '+target.name)
+  override=plan.get('base_textures',{}).get(original)
+  src=Path(override) if override else resolve(None,texture_files,original)
+  if not src or not src.is_file():raise ValueError('Textura não encontrada: '+original)
+  if override and src.suffix.casefold()!=target.suffix.casefold():raise ValueError('A textura substituta precisa ter o mesmo formato: '+original)
+  shutil.copy2(src,target)
+ if plan.get('skin_folder'):
+  src=Path(plan['skin_folder']);files=index(src)
+  if not any(p.suffix.casefold()=='.cti' for p in files.values()):raise ValueError('Pasta de skins sem .cti')
+  destination=texture_root/('Pinturas_Convertidas'+plan.get('namespace',''))
+  if destination.exists():shutil.rmtree(destination)
+  selected=Path(plan['skin_file']).resolve() if plan.get('skin_file') else None
+  for file in files.values():
+   if selected and file.suffix.lower()=='.cti' and file.resolve()!=selected:continue
+   target=destination/file.relative_to(src);target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(file,target)
+ if plan.get('fonts_folder'):
+  src=Path(plan['fonts_folder']);files=index(src)
+  for file in files.values():
+   out=stage/'Fonts'/file.relative_to(src);out.parent.mkdir(parents=True,exist_ok=True)
+   if out.exists() and out.read_bytes()!=file.read_bytes():raise ValueError('Fontes conflitantes entre seções: '+file.name)
+   shutil.copy2(file,out)
+
 def build(template,plan,destination):
  # Reload reference to detect edits made since the project was opened.
- template=load_template(template['bus'],plan.get('reference_cfg'));check=scan_plan(template,plan);cfg,names=render_cfg(template,plan,check)
+ template=load_template(template['bus'],plan.get('reference_cfg'),plan.get('profile_bus'));check=scan_plan(template,plan);cfg,names=render_cfg(template,plan,check)
  name=plan.get('name','')
  if not re.fullmatch(r'[A-Za-z0-9_-]{1,64}',name):raise ValueError('Nome da pasta: use 1–64 letras sem acentos, números, _ ou -')
  dest=Path(destination).resolve();source=Path(template['root']).resolve()
  if dest==source or dest.is_relative_to(source):raise ValueError('Saída deve ficar fora da pasta de referência')
+ from articulated import load_chain
+ load_chain(plan.get('profile_bus') or template['bus'])
  dest.mkdir(parents=True,exist_ok=True);final=dest;stage=Path(tempfile.mkdtemp(prefix='.montagem_',dir=dest))
  try:
   vehicle=stage/'Vehicles'/name;shutil.copytree(source,vehicle)
-  for bus in vehicle.glob('*.bus'):
-   if bus.name!=Path(template['bus']).name:bus.unlink()
-  cfgpath=vehicle/Path(template['cfg']).relative_to(source);cfgpath.write_bytes(cfg.replace('\n','\r\n').encode('cp1252'))
+  write_section(template,plan,check,cfg,names,vehicle,stage)
   buspath=vehicle/Path(template['bus']).name
   buspath.write_bytes(set_arg(txt(buspath),'[friendlyname]',1,name).replace('\n','\r\n').encode('cp1252'))
-  texture_root=next((p for p in vehicle.iterdir() if p.name.casefold()=='texture'),vehicle/'Texture');texture_root.mkdir(exist_ok=True)
-  texture_files=index(Path(plan['converted'])/'texture') if check['counts']['replace'] else {}
-  used={m['target'] for m in plan['mapping'].values() if m['mode']=='replace'}
-  meshes=cfgpath.parent/'Convertidos';meshes.mkdir(exist_ok=True)
-  for f in used:
-   raw=(Path(plan['converted'])/'model'/f).read_bytes();(meshes/f).parent.mkdir(parents=True,exist_ok=True);(meshes/f).write_bytes(patch_textures(raw,names))
-  needed={s['texture'] for f in used for s in check['targets'][f]['slots_actual'] if s['texture']}
-  for original in needed:
-   target=texture_root/names[original]
-   if target.exists():raise ValueError('Colisão com textura da referência: '+target.name)
-   override=plan.get('base_textures',{}).get(original)
-   src=Path(override) if override else resolve(None,texture_files,original)
-   if not src or not src.is_file():raise ValueError('Textura não encontrada: '+original)
-   if override and src.suffix.casefold()!=target.suffix.casefold():raise ValueError('A textura substituta precisa ter o mesmo formato: '+original)
-   shutil.copy2(src,target)
-  if plan.get('skin_folder'):
-   src=Path(plan['skin_folder']);files=index(src)
-   if not any(p.suffix.casefold()=='.cti' for p in files.values()):raise ValueError('Pasta de skins sem .cti')
-   destination=texture_root/'Pinturas_Convertidas'
-   if destination.exists():shutil.rmtree(destination)
-   selected=Path(plan['skin_file']).resolve() if plan.get('skin_file') else None
-   for file in files.values():
-    if selected and file.suffix.lower()=='.cti' and file.resolve()!=selected:continue
-    target=destination/file.relative_to(src);target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(file,target)
-  if plan.get('fonts_folder'):
-   src=Path(plan['fonts_folder']);index(src);shutil.copytree(src,stage/'Fonts')
   (stage/'montagem.json').write_text(json.dumps(plan,ensure_ascii=False,indent=2),encoding='utf8')
   (stage/'LEIA_ANTES_DE_INSTALAR.txt').write_text('Pacote de montagem. Faça backup antes de instalar.\nMotor selecionado: '+plan['engine']+'\n\n'+'\n'.join(check['warnings'])+'\n\nCopie Vehicles e, se fornecida, Fonts para a instalação de teste. Recursos externos de som podem continuar dependendo do veículo original. Confira o logfile do jogo.\n',encoding='utf8')
   publish(stage,final);shutil.rmtree(stage);return final

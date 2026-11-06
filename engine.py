@@ -7,7 +7,7 @@ def blender_path():
     root = Path(sys.executable).parent if getattr(sys,'frozen',False) else BASE
     candidates = [root/'runtime'/'blender.exe', root/'runtime'/'blender', os.environ.get('BLENDER_PATH',''), shutil.which('blender')]
     return next((str(p) for p in candidates if p and Path(p).is_file()), '')
-def run(source, destination, blender='', scale=1, rotation=0, repair_geometry=False, organize=False, texture_directory=''):
+def run(source, destination, blender='', scale=1, rotation=0, repair_geometry=False, organize=False, texture_directory='', preserve_skin=False):
     src = Path(source).resolve()
     if not src.is_file() or src.suffix.lower() not in {'.blend','.obj','.3ds'}:
         raise ValueError('Selecione um arquivo .blend, .obj ou .3ds válido.')
@@ -25,7 +25,7 @@ def run(source, destination, blender='', scale=1, rotation=0, repair_geometry=Fa
         temp = Path(temp)
         stage = temp/'result'
         job = temp/'job.json'
-        job.write_text(json.dumps({'source':str(src),'output':str(stage),'scale':scale,'rotation':rotation,'repair_geometry':bool(repair_geometry),'organize':bool(organize),'texture_directory':str(Path(texture_directory).resolve()) if texture_directory else ''}),encoding='utf8')
+        job.write_text(json.dumps({'source':str(src),'output':str(stage),'scale':scale,'rotation':rotation,'repair_geometry':bool(repair_geometry),'organize':bool(organize),'preserve_skin':bool(preserve_skin),'texture_directory':str(Path(texture_directory).resolve()) if texture_directory else ''}),encoding='utf8')
         proc = subprocess.run([str(exe),'--background','--factory-startup','--disable-autoexec','--python-exit-code','1','--python',str(BASE/'backend.py'),'--',str(job)],
                               stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,encoding='utf8',errors='replace',timeout=1800,
                               creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))

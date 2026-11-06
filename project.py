@@ -10,7 +10,12 @@ def atomic_text(path,text):
  finally:tmp.unlink(missing_ok=True)
 
 def new_project(report):
- return {'version':2,'profile':None,'parts':[{'id':'part_%04d'%i,'name':m['object'],'file':m['file'],'parent':'','pivot':None,'animations':[],'mouseevent':'','visible':None,'material_rules':[],'materials':m.get('materials',[]),'origin_xyz':m.get('origin_xyz',[0,0,0])} for i,m in enumerate(report['meshes'])]}
+ result={'version':2,'profile':None,'markers':report.get('markers',[]),'lights':[],'parts':[{'id':'part_%04d'%i,'name':m['object'],'file':m['file'],'parent':'','pivot':None,'animations':[],'mouseevent':'','visible':None,'material_rules':[],'materials':m.get('materials',[]),'bones':m.get('bones',[]),'skin_bindings':{},'origin_xyz':m.get('origin_xyz',[0,0,0])} for i,m in enumerate(report['meshes'])]}
+ for p in result['parts']:
+  for bone in p['bones']:
+   matches=[x['id'] for x in result['parts'] if x['name']==bone and x['id']!=p['id']]
+   p['skin_bindings'][bone]=matches[0] if len(matches)==1 else ''
+ return result
 
 def recipe(kind,variable='door_0',factor=-90,axle=0,side='R'):
  def a(v,f,r=(0,0,0),kind='rot'):return {'type':kind,'variable':v,'factor':f,'origin_rotation':list(r)}
@@ -18,6 +23,7 @@ def recipe(kind,variable='door_0',factor=-90,axle=0,side='R'):
  if kind=='door':return [a(variable,float(factor),(0,90,0))]
  if kind=='steering':return [a('Axle_Steering_0_L',float(factor),(0,90,0))]
  if kind=='custom':return [a(variable,float(factor))]
+ if kind in {'wiper','lever'}:return [a(variable,float(factor))]
  if kind in {'wheel_front','wheel_rear'}:
   if side not in {'L','R'} or int(axle)!=axle or not 0<=axle<=9:raise ValueError('Eixo/lado inválido')
   suffix=str(axle)+'_'+side
@@ -37,9 +43,9 @@ def number(v):
 
 def variable_ok(v,profile):
  token(v,'variável')
- return v in {'throttle','brake','clutch'} or bool(re.fullmatch(r'(?:Wheel_Rotation|Axle_Suspension|Axle_Steering)_[0-9]_[LR]',v)) or v in (profile or {}).get('variables',[])
+ return v in {'throttle','brake','clutch'} or bool(re.fullmatch(r'(?:Wheel_Rotation|Axle_Suspension|Axle_Steering)_[0-9]_[LR]',v)) or bool(re.fullmatch(r'articulation_[0-9]+_(?:alpha|beta)',v)) or v in (profile or {}).get('variables',[])
 
-def validate_project(project):
+def validate_project(project,for_export=True):
  if project.get('version')!=2:raise ValueError('Versão de projeto incompatível')
  parts=project.get('parts',[])
  if not parts:raise ValueError('Projeto sem peças')
@@ -53,6 +59,10 @@ def validate_project(project):
   f=p['file']
   mesh_path(f)
   if p.get('parent') and p['parent'] not in ids:raise ValueError('Parent não encontrado')
+  for bone in p.get('bones',[]):
+   target=p.get('skin_bindings',{}).get(bone,'')
+   if not target and not for_export:continue
+   if target not in ids or target==p['id']:raise ValueError('Vínculo smoothskin inválido: '+p['name']+' / '+bone)
   if p.get('pivot') is not None:
    if len(p['pivot'])!=3:raise ValueError('Pivô requer XYZ')
    for v in p['pivot']:number(v)
@@ -84,23 +94,33 @@ def validate_project(project):
     if Path(rule['nightmap']).name!=rule['nightmap'] or re.search(r'[\\/\r\n\[\]:]',rule['nightmap']):raise ValueError('Nightmap inválido')
     if not variable_ok(rule.get('variable',''),profile):raise ValueError('Variável de luz não reconhecida')
  if profile and profile.get('missing'):raise ValueError('O perfil possui arquivos de script/variáveis/constantes ausentes. Selecione uma base completa.')
+ from model_lights import validate_lights
+ validate_lights(project.get('lights',[]),profile)
  byid={p['id']:p for p in parts};order=[];visiting=set();done=set()
  def visit(p):
   if p['id'] in visiting:raise ValueError('Ciclo na hierarquia')
   if p['id'] in done:return
   visiting.add(p['id'])
   if p.get('parent'):visit(byid[p['parent']])
+  for target in p.get('skin_bindings',{}).values():
+   if target in byid:visit(byid[target])
   visiting.remove(p['id']);done.add(p['id']);order.append(p)
  for p in parts:visit(p)
  return order
 
 def render_cfg(project):
- parts=validate_project(project);out=['########################################','MODELO UNIVERSAL - O3D Auto Converter 0.6','Configuracao visual; requer integracao ao .bus e scripts.','########################################','']
+ parts=validate_project(project);out=['########################################','MODELO UNIVERSAL - O3D Studio 0.0.2','Configuracao visual; requer integracao ao .bus e scripts.','########################################','']
  def emit(tag,*args):out.extend([tag,*map(str,args),''])
+ from model_lights import render_lights
+ out.extend(render_lights(project.get('lights',[])))
+ mesh_indices={p['id']:i for i,p in enumerate(parts)}
  for p in parts:
   label=str(p.get('name',p['id'])).replace('\n',' ').replace('\r',' ').encode('cp1252','replace').decode('cp1252')
   out.extend(['########################################','PECA: '+label,'########################################',''])
   emit('[mesh]',p['file'].replace('/','\\'));emit('[mesh_ident]',p['id'])
+  if p.get('bones'):
+   emit('[smoothskin]')
+   for bone in p['bones']:emit('[setbone]',bone,mesh_indices[p['skin_bindings'][bone]])
   if p.get('parent'):emit('[animparent]',p['parent'])
   if p.get('mouseevent'):emit('[mouseevent]',p['mouseevent'])
   if p.get('visible'):emit('[visible]',p['visible']['variable'],number(p['visible']['value']))
