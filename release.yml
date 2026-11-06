@@ -1,0 +1,60 @@
+name: Build and publish O3D Studio
+
+on:
+  push:
+    branches: [main]
+    paths: [VERSION, .github/workflows/release.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: o3d-studio-release
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install build and test dependencies
+        run: python -m pip install pyinstaller==6.11.1 Pillow==11.0.0
+      - name: Run automated tests
+        run: python -m unittest discover -s tests -p "test_*.py"
+      - name: Construct and exercise Tk screens
+        run: python tests/smoke_ui.py
+      - name: Build Windows application
+        run: >-
+          python -m PyInstaller --noconfirm --clean --onedir --windowed
+          --name O3DStudio
+          --add-data "backend.py;." --add-data "project.py;."
+          --add-data "model_lights.py;." --add-data "asset_paths.py;."
+          --add-data "material_graph.py;." --add-data "vendor;vendor" app.py
+      - name: Package source and Windows build
+        shell: pwsh
+        run: |
+          $releaseVersion = (Get-Content VERSION -Raw).Trim()
+          if ($releaseVersion -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid VERSION' }
+          Copy-Item LICENSE,README.md,THIRD_PARTY.md,GUIA_v0.0.2.md,RELEASE_NOTES.md dist/O3DStudio/
+          New-Item -ItemType Directory -Force dist/O3DStudio/examples | Out-Null
+          Copy-Item -Recurse examples/Deformacao_Demo dist/O3DStudio/examples/
+          Compress-Archive -Path dist/O3DStudio -DestinationPath "dist/O3D_Studio_v${releaseVersion}_windows.zip"
+          git archive --format=zip --prefix=O3D_Studio/ -o "dist/O3D_Studio_v${releaseVersion}_source.zip" HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Source archive failed' }
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $releaseVersion = (Get-Content VERSION -Raw).Trim()
+          gh release view "v$releaseVersion" --repo "${{ github.repository }}" 2>$null
+          if ($LASTEXITCODE -eq 0) { throw 'Release already exists; no assets were overwritten.' }
+          gh release create "v$releaseVersion" --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "O3D Studio v$releaseVersion" --notes-file RELEASE_NOTES.md "dist/O3D_Studio_v${releaseVersion}_windows.zip" "dist/O3D_Studio_v${releaseVersion}_source.zip"
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
