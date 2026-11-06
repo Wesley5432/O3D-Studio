@@ -1,4 +1,4 @@
-# O3D Studio 0.0.1
+# O3D Studio 0.0.2
 
 Ferramenta para converter modelos BLEND, OBJ e 3DS em peças O3D, revisar materiais e animações e montar um veículo para testes no OMSI 2 ou no openOMSI.
 
