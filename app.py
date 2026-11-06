@@ -5,7 +5,7 @@ from editor import open_editor
 
 def main(parent=None):
     root = tk.Toplevel(parent) if parent else tk.Tk()
-    root.title('O3D Studio — 0.0.1')
+    root.title('O3D Studio — v0.0.2')
     root.geometry('900x720')
     root.minsize(820,650)
     from ui_theme import apply_theme
@@ -36,6 +36,8 @@ def main(parent=None):
     repair=tk.BooleanVar(value=False)
     ttk.Checkbutton(frame,text='Reparar normais nulas e remover triângulos sem área (somente na saída)',variable=repair).pack(anchor='w')
     ttk.Label(frame,text='Sem pasta O3D aleatória. Arquivos existentes recebem backup ZIP.\nApós converter, use o editor para exportar somente a peça selecionada ou todas.',style='Muted.TLabel').pack(anchor='w',pady=8)
+    preserve_skin=tk.BooleanVar(value=False)
+    ttk.Checkbutton(frame,text='Preservar pesos dos grupos de vértices (coifa / sanfona / smoothskin)',variable=preserve_skin).pack(anchor='w',pady=4)
     last_output=[None]
     status=tk.StringVar(value='Pronto para converter.'); messages=queue.Queue()
     def start():
@@ -44,6 +46,7 @@ def main(parent=None):
             messagebox.showerror('Dados incompletos','Escolha o modelo e a pasta de saída.'); return
         values['repair_geometry'] = repair.get()
         values['organize'] = organize.get()
+        values['preserve_skin'] = preserve_skin.get()
         button.config(state='disabled'); status.set('Convertendo… Aguarde o Blender terminar.')
         def worker():
             try: messages.put((True,str(run(**values))))
